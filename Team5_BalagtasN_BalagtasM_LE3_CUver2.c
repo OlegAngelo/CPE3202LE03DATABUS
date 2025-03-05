@@ -14,6 +14,20 @@
 uint8_t dataMemory[MEM_SIZE];
 uint8_t ioBuffer[IO_SIZE];
 
+// Global Bus Variables
+uint16_t ADDR;       // 11-bit Address Bus
+uint8_t BUS;         // 8-bit Data Bus
+uint8_t CONTROL;     // 5-bit Control Signals
+
+// Global Control Signals
+uint8_t IOM;         // I/O or Memory select (1 for Memory, 0 for I/O)
+uint8_t RW;          // Read/Write signal (1 for Write, 0 for Read)
+uint8_t OE;          // Output Enable signal
+
+// Function prototypes
+void MainMemory(void);
+void IOMemory(void);
+
 // Control Unit function
 int CU(void)
 {
@@ -24,17 +38,47 @@ int CU(void)
     uint16_t IOAR;       // I/O Address Register
     uint8_t IOBR;        // I/O Buffer Register
 
+    // Local control signals
+    uint8_t Fetch = 0;
+    uint8_t Memory = 0;
+    uint8_t IO = 0;
+    uint8_t Increment = 0;
+
     while (1)
     {
         printf("\n*****************************\n");
         printf("PC: 0x%03X\n", PC);
         printf("Fetching instruction...\n");
 
-        // Fetch instruction
-        IR = dataMemory[PC] << 8; // get upper byte from memory pointed to by PC & move the byte to the correct position
-        PC++;                     // point to the address of the lower byte
-        IR |= dataMemory[PC];     // get lower byte from memory pointed to by PC
-        PC++;                     // points to the next instruction
+        /* setting external control signals for fetch */
+        CONTROL = 0x00;  // Clear control signals
+        IOM = 1;         // Main Memory access
+        RW = 0;          // read operation (fetch)
+        OE = 1;          // allow data movement to/from memory
+
+        /* Fetching Instruction (2 cycle) */
+        Fetch = 1;       // set local control signal Fetch to 1
+        IO = 0;
+        Memory = 0;
+
+        /* fetching the upper byte */
+        ADDR = PC;
+        MainMemory();    // fetch upper byte
+        if(Fetch == 1)
+        {
+            IR = (int)BUS;   // load instruction to IR
+            IR = IR << 8;    // shift IR 8 bits to the left
+            PC++;           // points to the lower byte
+            ADDR = PC;      // update address bus
+        }
+
+        /* fetching the lower byte */
+        MainMemory();    // fetch lower byte
+        if(Fetch == 1)
+        {
+            IR = IR | BUS;   // load the instruction on bus to lower 8 bits of IR
+            PC++;           // points to the next instruction
+        }
 
         printf("IR: 0x%04X\n", IR);
 
@@ -46,28 +90,48 @@ int CU(void)
         printf("Operand: 0x%03X\n", operand);
 
         // Execute instruction
+        CONTROL = inst_code;  // Set control signals for current instruction
+        Fetch = 0;           // Clear fetch signal
+
         switch (inst_code)
         {
         case 0x06: // WB - Write data to MBR
             printf("Instruction: WB\n");
             printf("Loading data to MBR...\n");
             MBR = operand & 0xFF;
-            printf("MBR : 0x%02X\n", MBR);
+            printf("MBR: 0x%02X\n", MBR);
             break;
 
         case 0x01: // WM - Write to Memory
             printf("Instruction: WM\n");
             printf("Writing data to memory...\n");
             MAR = operand;
-            dataMemory[MAR] = MBR;
+            Memory = 1;
+            IO = 0;
+            IOM = 1;
+            RW = 1;
+            OE = 1;
+            ADDR = MAR;
+            if(Memory)
+                BUS = MBR;
+            MainMemory();
+            printf("Data written to memory at address 0x%03X\n", MAR);
             break;
 
         case 0x02: // RM - Read from Memory
             printf("Instruction: RM\n");
             printf("Reading data from memory...\n");
             MAR = operand;
-            MBR = dataMemory[MAR];
-            printf("MBR : 0x%02X\n", MBR);
+            Memory = 1;
+            IO = 0;
+            IOM = 1;
+            RW = 0;
+            OE = 1;
+            ADDR = MAR;
+            MainMemory();
+            if(Memory)
+                MBR = BUS;
+            printf("MBR: 0x%02X\n", MBR);
             break;
 
         case 0x03: // BR - Branch
@@ -80,25 +144,70 @@ int CU(void)
             printf("Instruction: WIB\n");
             printf("Loading data to IOBR...\n");
             IOBR = operand & 0xFF;
-            printf("IOBR : 0x%02X\n", IOBR);
+            printf("IOBR: 0x%02X\n", IOBR);
             break;
 
         case 0x05: // WIO - Write to I/O Buffer
             printf("Instruction: WIO\n");
             printf("Writing to IO buffer...\n");
             IOAR = operand;
-            ioBuffer[IOAR] = IOBR;
+            Memory = 0;
+            IO = 1;
+            IOM = 0;
+            RW = 1;
+            OE = 1;
+            ADDR = IOAR;
+            if(IO)
+                BUS = IOBR;
+            IOMemory();
+            printf("Data written to I/O buffer at address 0x%02X\n", IOAR);
             break;
+
         case 0x1F: // EOP - End of Program
             printf("Instruction: EOP\n");
             printf("End of program.\n");
+            printf("\nFinal Bus States:\n");
+            printf("BUS: 0x%02X\n", BUS);
+            printf("ADDR: 0x%03X\n", ADDR);
+            printf("CONTROL: 0x%02X\n", CONTROL);
+            printf("IOM: %d, R/W: %d, OE: %d\n", IOM, RW, OE);
             printf("\n*****************************\n");
             return 1;
+
         default:
             printf("Unknown instruction code 0x%02X\n", inst_code);
             printf("\n*****************************\n");
             return 0;
         }
+
+        // Display bus and control signal states after each instruction
+        printf("\nBus States:\n");
+        printf("BUS: 0x%02X\n", BUS);
+        printf("ADDR: 0x%03X\n", ADDR);
+        printf("CONTROL: 0x%02X\n", CONTROL);
+        printf("IOM: %d, R/W: %d, OE: %d\n", IOM, RW, OE);
+    }
+}
+
+void MainMemory(void)
+{
+    if(IOM == 1)
+    {
+        if(RW == 0 && OE == 1)      // memory read
+            BUS = dataMemory[ADDR];
+        else if(RW == 1 && OE == 1)  // memory write
+            dataMemory[ADDR] = BUS;
+    }
+}
+
+void IOMemory(void)
+{
+    if(IOM == 0)
+    {
+        if(RW == 0 && OE == 1)      // I/O read
+            BUS = ioBuffer[ADDR];
+        else if(RW == 1 && OE == 1)  // I/O write
+            ioBuffer[ADDR] = BUS;
     }
 }
 
